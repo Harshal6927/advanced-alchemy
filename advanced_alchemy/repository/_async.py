@@ -167,6 +167,7 @@ class SQLAlchemyAsyncRepositoryProtocol(FilterableRepositoryProtocol[ModelT], Pr
         error_messages: Optional[Union[ErrorMessages, EmptyType]] = Empty,
         load: Optional[LoadSpec] = None,
         execution_options: Optional[dict[str, Any]] = None,
+        enable_file_object_cleanup: bool = False,
     ) -> Sequence[ModelT]: ...
 
     async def delete_where(
@@ -805,6 +806,7 @@ class SQLAlchemyAsyncRepository(SQLAlchemyAsyncRepositoryProtocol[ModelT], Filte
         load: Optional[LoadSpec] = None,
         execution_options: Optional[dict[str, Any]] = None,
         uniquify: Optional[bool] = None,
+        enable_file_object_cleanup: bool = False,
     ) -> Sequence[ModelT]:
         """Delete instance identified by `item_id`.
 
@@ -821,6 +823,8 @@ class SQLAlchemyAsyncRepository(SQLAlchemyAsyncRepositoryProtocol[ModelT], Filte
             load: Set default relationships to be loaded
             execution_options: Set default execution options
             uniquify: Optionally apply the ``unique()`` method to results before returning.
+            enable_file_object_cleanup: When True, uses session.delete() to ensure FileObject listeners can process cleanup.
+                When False, uses bulk delete for better performance but FileObject cleanup may not work.
 
         Returns:
             The deleted instances.
@@ -846,7 +850,25 @@ class SQLAlchemyAsyncRepository(SQLAlchemyAsyncRepositoryProtocol[ModelT], Filte
             chunk_size = self._get_insertmanyvalues_max_parameters(chunk_size)
             for idx in range(0, len(item_ids), chunk_size):
                 chunk = item_ids[idx : min(idx + chunk_size, len(item_ids))]
-                if self._dialect.delete_executemany_returning:
+
+                if enable_file_object_cleanup:
+                    chunk_instances = await self.session.scalars(
+                        self._get_delete_many_statement(
+                            statement_type="select",
+                            model_type=self.model_type,
+                            id_attribute=id_attribute,
+                            id_chunk=chunk,
+                            supports_returning=self._dialect.delete_executemany_returning,
+                            loader_options=loader_options,
+                            execution_options=execution_options,
+                        ),
+                    )
+                    chunk_instances_list = list(chunk_instances)
+                    instances.extend(chunk_instances_list)
+
+                    for instance in chunk_instances_list:
+                        await self.session.delete(instance)
+                elif self._dialect.delete_executemany_returning:
                     instances.extend(
                         await self.session.scalars(
                             self._get_delete_many_statement(
